@@ -16,45 +16,63 @@
  */
 
 #include <avr/pgmspace.h>  // Required for using PROGMEM, Syntax: const dataType variableName[] PROGMEM = {data0, data1, data3...};
+#include <EEPROMex.h>
 
 #define array_len( x )  ( sizeof( x ) / sizeof( *x ) )
 
-const int ens_ON_pin = 53;
-const int ens_OFF_pin = 49;
+// Define ENS2020 Pin Mappings
+const byte ens_ON_pin = 53;
+const byte ens_OFF_pin = 49;
+const byte ens_MENU_pin = 52;
+const byte ens_SEL_pin = 46;
+const byte ens_FWD_pin = 50;
+const byte ens_BWD_pin = 48;
+const byte ens_UP_pin = 51;
+const byte ens_DOWN_pin = 47;
 
-const int ens_MENU_pin = 52;
-const int ens_SEL_pin = 46;
+// Define microcontroller input/output pin mappings
+const byte stim_received_LED_pin = 27;
+const byte end_of_stim_LED_pin  = 31;    // Use to indicate end of trial
+const byte AIN1_pin = 5;     // Negative input pin of Analog comparator; Positive pin is internal reference = 1.1V
+const byte ledPin = LED_BUILTIN;
 
-const int ens_FWD_pin = 50;
-const int ens_BWD_pin = 48;
 
-const int ens_UP_pin = 51;
-const int ens_DOWN_pin = 47;
-
-int stim_received_LED_pin = 27;
-int end_of_stim_LED_pin  = 31;    // Use to indicate end of trial
-int AIN1_pin = 5;     // Negative input pin of Analog comparator; Positive pin is internal reference = 1.1V
-int ledPin = 13;
-int Number_of_stim_bouts_required = 10;
 const int keypress_interval_very_long = 500;
 const int keypress_interval_long = 200;
+const int keypress_int_short = 150;
 volatile boolean stim_recvd = false;
 volatile int stim_counter = 0;
+
+// Define EEPROM variables
+int Number_of_stim_bouts = 0;
+int Number_of_voltage_increments = 0;
+double Stim_voltage_mult_factor = 0.00;
+double dVolt_per_dIncrement = 0.00;
+
+const char welcome_msg[] PROGMEM = {"--------------Welcome to the Electrical Stimulator Control Interface--------------\n"
+"Select one of the two following options.\n"
+"1 - Configure stimulator\n"
+"2 - Run stimulator"};
+
+char msg_char;
+byte user_selection = 0;
+boolean valid_user_input = false;
+int user_input = 0;
 
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);        // Turn on the Serial Port
-
+  
   // Configure ENS - Set MENU, SEL, UP and DOWN pins as output and set them to HIGH; rest as input
   pinMode(ens_ON_pin, INPUT_PULLUP);
   pinMode(ens_OFF_pin, INPUT_PULLUP);
   pinMode(ens_FWD_pin, INPUT_PULLUP);
   pinMode(ens_BWD_pin, INPUT_PULLUP);
   
-  /pinMode(ens_DOWN_pin, OUTPUT);
-  /digitalWrite(ens_DOWN_pin, HIGH);
-  /pinMode(ens_UP_pin, OUTPUT);
-  /digitalWrite(ens_UP_pin, HIGH);
+  pinMode(ens_DOWN_pin, OUTPUT);
+  digitalWrite(ens_DOWN_pin, HIGH);
+  pinMode(ens_UP_pin, OUTPUT);
+  digitalWrite(ens_UP_pin, HIGH);
   pinMode(ens_MENU_pin, OUTPUT);
   digitalWrite(ens_MENU_pin, HIGH);
   pinMode(ens_SEL_pin, OUTPUT);
@@ -85,9 +103,96 @@ void setup() {
     (1<<ACIS1) | (0<ACIS0); // Analog Comparator Interrupt Mode: Comparator Interrupt on Falling Output Edge of comparator, by default comparator output should be high
   */
   interrupts();             // enable all software interrupts
-    
-  Serial.println("Waiting for stim pulses....");
-  Serial.println("Stimulation bout " + String(stim_counter) + " of " + String(Number_of_stim_bouts_required) + " received");
+
+  //Read EEPROM variables to initialize parameters
+   int EEPROM_address_Number_of_stim_bouts = EEPROM.getAddress(sizeof(int));
+   Number_of_stim_bouts = EEPROM.readInt(EEPROM_address_Number_of_stim_bouts);
+   int EEPROM_address_Stim_voltage_mult_factor = EEPROM.getAddress(sizeof(double));
+   Stim_voltage_mult_factor = EEPROM.readDouble(EEPROM_address_Stim_voltage_mult_factor);
+   int EEPROM_address_dVolt_per_dIncrement = EEPROM.getAddress(sizeof(double));
+   dVolt_per_dIncrement = EEPROM.readDouble(EEPROM_address_dVolt_per_dIncrement);
+
+  // Added to print long welcome msg
+  Serial.println();
+  for (int k = 0; k < strlen_P(welcome_msg); k++)
+  {
+    msg_char =  pgm_read_byte_near(welcome_msg + k);
+    Serial.print(msg_char);
+  }
+  Serial.println();  
+  Serial.println();
+  while (Serial.available() == 0); // Wait for user input
+  user_selection = Serial.parseInt();  // Only accepts integers
+  Serial.print("You entered : ");
+  Serial.print(user_selection);
+
+  switch (user_selection) {
+    case 1: 
+            Serial.println(F(", Configure stimulator"));            
+            Serial.println(F("This is the current configuration:"));
+            Serial.print(F("No. of stim bouts = ")); Serial.println(Number_of_stim_bouts);
+            Serial.print(F("Stim volt multX = ")); Serial.println(Stim_voltage_mult_factor);
+            Serial.print(F("dVolt_per_dIncrement = ")); Serial.println(dVolt_per_dIncrement);
+            
+            Serial.print(F("Do you want to change the number of stimulation bouts? (y/n):"));
+            user_selection = read_user_response(); Serial.println(char(user_selection));
+            if (user_selection == 'y' || user_selection == 'Y'){
+                while(!valid_user_input){
+                    Serial.print(F("Enter number of stimulation bouts required (5-150): "));
+                    while (Serial.available() == 0); // Wait for user input
+                    user_input = Serial.parseInt();  // Only accepts integers
+                    if (user_input > 5 && user_input < 150){
+                      Number_of_stim_bouts = user_input;
+                      Serial.println(Number_of_stim_bouts);
+                      EEPROM.updateByte(EEPROM_address_Number_of_stim_bouts,Number_of_stim_bouts);
+                      valid_user_input = true;
+                    }
+                    else{
+                      Serial.println(F("Invalid input !!"));
+                    }
+                }
+                valid_user_input = false;             
+            }
+            Serial.print(F("Stimulator configuration complete"));
+            
+    case 2: 
+            Serial.println(F(", Ready to run stimulator"));
+            while(!valid_user_input){
+                   Serial.println(F("Enter number of voltage increments (10-35): "));
+                   while (Serial.available() == 0); // Wait for user input
+                   user_input = Serial.parseInt();  // Only accepts integers
+                   if (user_input >= 10 && user_input <= 35){
+                      Number_of_voltage_increments = user_input;
+                      Serial.println(Number_of_voltage_increments);
+                      valid_user_input = true;
+                    }
+                   else{
+                      Serial.println(F("Invalid input !!"));
+                    }
+               }
+            valid_user_input = false;
+                
+            //Turn ON the stimulator
+            Serial.print(F("Starting stimulator. Adjusting voltage"));
+            digitalWrite(ens_SEL_pin, LOW);
+            delay(keypress_interval_very_long);
+            digitalWrite(ens_SEL_pin, HIGH);
+            delay(keypress_interval_very_long);
+        
+            // Increase by required number of increments immediately
+            for (int inc = 1; inc <= Number_of_voltage_increments; inc++) {
+              Serial.print('.');
+              digitalWrite(ens_UP_pin, LOW);
+              delay(keypress_int_short);
+              digitalWrite(ens_UP_pin, HIGH);
+              delay(keypress_int_short);
+            }
+            Serial.println();
+            Serial.println(F("Starting counter")); 
+            break;
+    default:
+            Serial.println(F(", Incorrect Input!! Reset Controller")); // Strangely, three exclamation marks breaks the Mega2560 bootloader
+  }
 }
 
 void loop() {
@@ -95,7 +200,7 @@ void loop() {
   ACSR |= (1 << ACI); // Clear pending interrupts
   ACSR |= (1 << ACIE);      // Now enable analog comaprator interrupt
   // Wait for 5 trials
-  for (int trial_no = 1; trial_no <= Number_of_stim_bouts_required; trial_no++) {
+  for (int trial_no = 1; trial_no <= Number_of_stim_bouts; trial_no++) {
     while (!stim_recvd) {     // 1st measurement
       digitalWrite(end_of_stim_LED_pin, HIGH);
       delay(100);
@@ -125,7 +230,7 @@ ISR(ANALOG_COMP_vect) {
   if (!stim_recvd){
     stim_recvd = true;
     stim_counter++;
-    Serial.println("Stimulation bout " + String(stim_counter) + " of " + String(Number_of_stim_bouts_required) + " received");
+    Serial.println("Stimulation bout " + String(stim_counter) + " of " + String(Number_of_stim_bouts) + " received");
   }
   
 
@@ -140,5 +245,26 @@ ISR(ANALOG_COMP_vect) {
     digitalWrite(end_of_stim_LED_pin, LOW);
     Serial.println("End of stimulation.");
   }*/
-
 }
+
+char read_user_response(){
+  boolean valid_response = false;
+  char serial_data;
+
+  while (!valid_response){
+    while (Serial.available() == 0); // Wait for user input
+    serial_data = Serial.read();
+    switch (serial_data){
+      case 'y': case 'Y': case 'n': case 'N': 
+              valid_response = true;
+              break;
+      case '\n': case '\r':
+              valid_response = false;
+              break;
+      default: 
+              Serial.println(F("Invalid input! Enter again: "));
+              break;
+    }
+  }  
+}
+
