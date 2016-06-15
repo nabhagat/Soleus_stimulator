@@ -57,11 +57,16 @@ const char welcome_msg[] PROGMEM = {"--------------Welcome to the Electrical Sti
 char msg_char;
 byte user_selection = 0;
 boolean valid_user_input = false;
+boolean stringComplete = false;
+String inputString ="";
 int user_input = 0;
 
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);        // Turn on the Serial Port
+  
+  // reserve 10 bytes for the inputString:
+  inputString.reserve(10);
   
   // Configure ENS - Set MENU, SEL, UP and DOWN pins as output and set them to HIGH; rest as input
   pinMode(ens_ON_pin, INPUT_PULLUP);
@@ -122,11 +127,11 @@ void setup() {
   Serial.println();  
   Serial.println();
   while (Serial.available() == 0); // Wait for user input
-  user_selection = Serial.parseInt();  // Only accepts integers
+  user_input = Serial.parseInt();  // Only accepts integers
   Serial.print("You entered : ");
-  Serial.print(user_selection);
+  Serial.print(user_input);
 
-  switch (user_selection) {
+  switch (user_input) {
     case 1: 
             Serial.println(F(", Configure stimulator"));            
             Serial.println(F("This is the current configuration:"));
@@ -267,4 +272,25 @@ char read_user_response(){
     }
   }  
 }
+
+/*
+  SerialEvent occurs whenever a new data comes in the
+ hardware serial RX.  This routine is run between each
+ time loop() runs, so using delay inside loop can delay
+ response.  Multiple bytes of data may be available.
+ */
+/*void serialEvent() {
+  while (Serial.available()) {
+    // get the new byte:
+    char inChar = (char)Serial.read();
+    // add it to the inputString:
+    inputString += inChar;
+    // if the incoming character is a newline, set a flag
+    // so the main loop can do something about it:
+    if (inChar == '\n') {
+      stringComplete = true;
+    }
+  }
+}*/
+
 
