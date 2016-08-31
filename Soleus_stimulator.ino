@@ -16,7 +16,7 @@
  */
 
 #include <avr/pgmspace.h>  // Required for using PROGMEM, Syntax: const dataType variableName[] PROGMEM = {data0, data1, data3...};
-#include <EEPROMex.h>
+#include "EEPROMex.h"
 
 #define array_len( x )  ( sizeof( x ) / sizeof( *x ) )
 
@@ -31,11 +31,17 @@ const byte ens_UP_pin = 51;
 const byte ens_DOWN_pin = 47;
 
 // Define microcontroller input/output pin mappings
-const byte stim_received_LED_pin = 27;
+//const byte stim_received_LED_pin = 27;
+const byte trigger_clock_pin = 27; 
 const byte end_of_stim_LED_pin  = 31;    // Use to indicate end of trial
 const byte AIN1_pin = 5;     // Negative input pin of Analog comparator; Positive pin is internal reference = 1.1V
 const byte ledPin = LED_BUILTIN;
+int EEG_R128_trigger = 34;
+int trigger_duration = 62411; // trigger low for 50 ms; should be > sampling interval (for EEG, sampling interval = 2 ms)
 
+// 3036 - 1Hz; //34286 - 2Hz; //53036 - 5 Hz; //62411 - 20 Hz;//64911 - 100 Hz; // 65411 - 500 Hz  // preload timer 65536-16MHz/256/2Hz
+const int trigger_generation_rate = 65411; // 500 Hz sampling with prescalar = 1/256
+const int ctc_compare_value = 249;  // 1Khz timer ctc mode, prescalar = 1/64; OCR1A = (16Mhz/prescalar(64)/1KHz) - 1
 
 const int keypress_interval_very_long = 500;
 const int keypress_interval_long = 200;
@@ -88,12 +94,14 @@ void setup() {
   pinMode(AIN1_pin, INPUT);
 
   ////Outputs
-  pinMode(stim_received_LED_pin, OUTPUT);
-  digitalWrite(stim_received_LED_pin, LOW);
-  pinMode(end_of_stim_LED_pin, OUTPUT);
-  digitalWrite(end_of_stim_LED_pin, LOW);
+  pinMode(trigger_clock_pin, OUTPUT);
+  digitalWrite(trigger_clock_pin, HIGH);
+  //pinMode(end_of_stim_LED_pin, OUTPUT);
+  //digitalWrite(end_of_stim_LED_pin, LOW);
   pinMode(ledPin, OUTPUT);
   digitalWrite(ledPin, LOW);
+  pinMode(EEG_R128_trigger, OUTPUT);            // Added 8-1-2016  
+  digitalWrite(EEG_R128_trigger, HIGH);
 
   //Configure Interrupts - Timers, Analog Comparators
   noInterrupts();     // disable all software interrupts
@@ -107,6 +115,33 @@ void setup() {
     (0<<ACIC) | // Analog Comparator Input Capture: Disabled
     (1<<ACIS1) | (0<ACIS0); // Analog Comparator Interrupt Mode: Comparator Interrupt on Falling Output Edge of comparator, by default comparator output should be high
   */
+
+  // Timer 1 for generating trigger clock @ 100 Hz Added 06-28-2016
+  //TCCR1A = 0x00;
+  //TCCR1B = 0x00;            // Timer stopped, to start timer - load 1/256 prescalar = 0x04
+  //TCNT1 =  trigger_generation_rate;
+  //TIMSK1 |= (1 << TOIE1);   // enable timer overflow interrupt
+
+  // Timer 1 in CTC mode
+  TCCR1A = 0x00;
+  TCCR1B = 0x00;
+  OCR1A = ctc_compare_value;
+  TIMSK1 |= (1 << OCIE1A);   // Enable ctc interrupt
+
+  //Timer 2 in Fast PWM
+  pinMode(9,OUTPUT); // OC2B pin
+  pinMode(10,OUTPUT); // OC2A pin
+  TCCR2A |= (1 << COM2A1) | (0 << COM2A0) | (1 << COM2B1) | (0 << COM2B0) | (1 << WGM21) | (1 << WGM20);
+  TCCR2B |= (0 << WGM22) | (1 << CS22) | (0 << CS21) | (0 << CS20);
+  OCR2A = 180;
+  OCR2B = 50;  
+
+  // Timer 3 controls the stimulus-onset trigger
+  TCCR3A = 0;
+  TCCR3B = 0x00;            // Timer stopped
+  TCNT3 =  trigger_duration;    
+  TIMSK3 |= (1 << TOIE3);   // enable timer overflow interrupt
+  
   interrupts();             // enable all software interrupts
 
   //Read EEPROM variables to initialize parameters
@@ -163,10 +198,10 @@ void setup() {
     case 2: 
             Serial.println(F(", Ready to run stimulator"));
             while(!valid_user_input){
-                   Serial.println(F("Enter number of voltage increments (10-35): "));
+                   Serial.println(F("Enter number of voltage increments (10-40): "));
                    while (Serial.available() == 0); // Wait for user input
                    user_input = Serial.parseInt();  // Only accepts integers
-                   if (user_input >= 10 && user_input <= 35){
+                   if (user_input >= 10 && user_input <= 41){
                       Number_of_voltage_increments = user_input;
                       Serial.println(Number_of_voltage_increments);
                       valid_user_input = true;
@@ -178,7 +213,12 @@ void setup() {
             valid_user_input = false;
                 
             //Turn ON the stimulator
-            Serial.print(F("Starting stimulator. Adjusting voltage"));
+            Serial.print(F("Starting stimulator and trigger clock. Adjusting voltage"));
+            //TCCR1B = 0x04; // Generate trigger clock using TIMER 1 - Added 06-28-2016
+            TCCR1B |= (1 << WGM12)|(1 << CS11)|(1 << CS10);
+            TCNT1  = 0; // Initialize counter
+            TIMSK1 |= (1 << OCIE1A);   // enable ctc interrupt
+            
             digitalWrite(ens_SEL_pin, LOW);
             delay(keypress_interval_very_long);
             digitalWrite(ens_SEL_pin, HIGH);
@@ -233,9 +273,11 @@ ISR(ANALOG_COMP_vect) {
   ACSR |= (0 << ACIE) | (1 << ACI); // Disable analog comparator interrupt until this pin is captured
 
   if (!stim_recvd){
+    digitalWrite(EEG_R128_trigger,LOW);    // Set trigger
     stim_recvd = true;
     stim_counter++;
-    Serial.println("Stimulation bout " + String(stim_counter) + " of " + String(Number_of_stim_bouts) + " received");
+    //Serial.println("Stimulation bout " + String(stim_counter) + " of " + String(Number_of_stim_bouts) + " received");
+    Serial.println(String(stim_counter));
   }
   
 
@@ -250,6 +292,16 @@ ISR(ANALOG_COMP_vect) {
     digitalWrite(end_of_stim_LED_pin, LOW);
     Serial.println("End of stimulation.");
   }*/
+}
+
+//ISR(TIMER1_OVF_vect) {
+  //TCNT1 = trigger_generation_rate;
+  
+ISR(TIMER1_COMPA_vect){
+  digitalWrite(trigger_clock_pin,LOW);
+  //delay(1);
+   delayMicroseconds(100);
+  digitalWrite(trigger_clock_pin,HIGH);
 }
 
 char read_user_response(){
@@ -292,5 +344,11 @@ char read_user_response(){
     }
   }
 }*/
+
+ISR(TIMER3_OVF_vect){
+  TCNT3 =  trigger_duration;
+  TCCR3B = 0x00;    // Stop Timer
+  digitalWrite(EEG_R128_trigger,HIGH);      // reset trigger
+}
 
 
